@@ -93,6 +93,7 @@ int sendall(int socket, const char *buf, unsigned int len, int flags) {
                         //goto send_error;?
                         break;
                 }
+                break;
 
             case 0: // timeout occurred
                 // the connection may be slow
@@ -125,12 +126,15 @@ send_error:
     return rc; // return bytesleft: should be (0) on success
 }
 
-void drawSpreadSheet() {
+void drawSpreadSheet(char *spreadsheet_data) {
     system("clear");
     // draw the spread sheet now
+    
+    // dummy drawing
+    printf("%s",spreadsheet_data);
 }
 
-static void *sig_handler() {
+static void *sig_handler(void *arg) {
     sigset_t set;
     int s, sig;
 
@@ -140,11 +144,11 @@ static void *sig_handler() {
     for (;;) {
         sig = 0; // SANITY
         s = sigwait(&set, &sig);
-        if (s != 0) {
+        if (s == 0) {
             s = pthread_sigmask(SIG_BLOCK, &set, NULL);
             if (sig == SIGNAL_QUIT_SPREADSHEET) {
                 handle_terminate();
-            } 
+            }
             s = pthread_sigmask(SIG_UNBLOCK, &set, NULL);
         }
     }
@@ -198,6 +202,7 @@ void * networkProcessor(void *arg) {
                         continue;
                         break;
                 }
+                break;
 
             case 0: // timeout occurred
                 /**
@@ -210,7 +215,7 @@ void * networkProcessor(void *arg) {
                 if (FD_ISSET(commSocket, &exceptfds)) {
                     printf("Socket Exception: Error reading scoket\n");
                 } else if (FD_ISSET(commSocket, &readfds)) {
-                    ires = recv(commSocket, recvbuf, recvbuflen - 1, 0);
+                    ires = recv(commSocket, &recvbuf[total], recvbuflen - total, 0);
                     /**
                      * process the data in the received buffer
                      */
@@ -260,6 +265,7 @@ void * networkProcessor(void *arg) {
                             received_data[ioffset] = '\0';
                             strncpy(recvbuf, &received_data[ioffset + 4], total - (ioffset + 4));
                             total = total - (ioffset + 4);
+                            recvbuf[total] = '\0';
 
                             /**
                              * if we receive a message from the server to end the program
@@ -267,11 +273,14 @@ void * networkProcessor(void *arg) {
                              * ---------------------------------------------------------------
                              * */
                             // if server says terminate then
-                            gbContinueProcessingSpreadSheet = 0;
-                            if (pthreadHandler != 0) {
-                                union sigval sval;
-                                sval.sival_int = 0;
-                                pthread_sigqueue(pthreadHandler, SIGNAL_QUIT_SPREADSHEET, sval);
+                            if (!strncmp(received_data, "SHUTDOWN", 8)) {
+                                gbContinueProcessingSpreadSheet = 0;
+                                if (pthreadHandler != 0) {
+                                    union sigval sval;
+                                    sval.sival_int = 0;
+                                    pthread_sigqueue(pthreadHandler, SIGNAL_QUIT_SPREADSHEET, sval);
+                                }
+                                continue;
                             }
 
                             //-------------------------
@@ -301,8 +310,8 @@ int main(int argc, char** argv) {
 
     int bOptVal = 1;
     int bOptLen = sizeof (int);
-    struct linger lingerOptVal;
-    int lingerOptLen = sizeof (struct linger);
+    //struct linger lingerOptVal;
+    //int lingerOptLen = sizeof (struct linger);
 
     char formula_data[1024];
 
@@ -346,10 +355,10 @@ int main(int argc, char** argv) {
             /*
              *  make sure the socket is nonblocking 
              */
-            if ((rc = fcntl(commSocket, F_SETFL, O_NONBLOCK)) != -1) {
-                if ((rc = connect(commSocket, rp->ai_addr, rp->ai_addrlen)) == 0)
-                    break; /* Success */
-            }
+            //if ((rc = fcntl(commSocket, F_SETFL, O_NONBLOCK)) != -1) {
+            if ((rc = connect(commSocket, rp->ai_addr, rp->ai_addrlen)) == 0)
+                break; /* Success */
+            //}
 
             close(commSocket);
             commSocket = -1;
@@ -382,17 +391,17 @@ int main(int argc, char** argv) {
          * we set linger so that is we crash the "**ALL**" of the last data will
          * still be sent
          */
-        lingerOptVal.l_onoff = 1; // true - turn linger on
-        lingerOptVal.l_linger = RECYCLE_TIMEOUT; // 10 seconds - wait before terminate
+        //lingerOptVal.l_onoff = 1; // true - turn linger on
+        //lingerOptVal.l_linger = RECYCLE_TIMEOUT; // 10 seconds - wait before terminate
         bOptLen = setsockopt(commSocket, SOL_SOCKET, SO_KEEPALIVE, (char*) &bOptVal, bOptLen);
-        bOptLen = setsockopt(commSocket, SOL_SOCKET, SO_LINGER, (char*) &lingerOptVal, lingerOptLen);
+        //bOptLen = setsockopt(commSocket, SOL_SOCKET, SO_LINGER, (char*) &lingerOptVal, lingerOptLen);
 
         /**
          * Create a thread to handle termination signals for network handler thread
          * We need a thread so that we can send signal to it - easily
          */
         if ((rc = pthread_create(&pthreadHandler, NULL, &sig_handler, NULL))) {
-            printf("Signal handler thread creation failed: [%d]", rc);
+            printf("Signal handler thread creation failed: [%d]\n", rc);
             exit(EXIT_FAILURE);
         }
 
@@ -401,12 +410,12 @@ int main(int argc, char** argv) {
          * network receiving and sread aheet update
          */
         if ((rc = pthread_create(&pthreadClient, NULL, &networkProcessor, (void *) &commSocket))) {
-            printf("Client network handling thread creation failed: [%d]", rc);
+            printf("Client network handling thread creation failed: [%d]\n", rc);
             exit(EXIT_FAILURE);
         }
 
         gcommSocket = commSocket;
-        printf("Ready To Start Processing Spread Sheet Requests");
+        printf("Ready To Start Processing Spread Sheet Requests\n");
 
 
         do {
@@ -415,8 +424,10 @@ int main(int argc, char** argv) {
             printf("\t\t\t1.] cell address = cell formula\n");
             printf("Formula ranges must be 1D rows or columns\n");
             printf("e.g. B3=average(A2,a6)\n");
-            scanf("1023%s", formula_data);
-            formula_data[1024] = '\0'; // SANITY
+            printf("Enter SpreadSheet Data : ");
+
+            scanf("%1000s", formula_data);
+            formula_data[1023] = '\0'; // SANITY
 
             /********************************************************************
              *  TODO
@@ -425,6 +436,9 @@ int main(int argc, char** argv) {
              * send it off to the server now terminate with "\r\n\r\n"
              *********************************************************************
              */
+            // make sure to terminate with "\r\n\r\n"
+            strncat(formula_data,"\r\n\r\n",1023);
+            
             rc = sendall(commSocket, formula_data, strlen(formula_data), 0);
             if (rc) {
                 /**

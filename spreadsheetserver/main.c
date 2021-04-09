@@ -94,6 +94,7 @@ int sendall(int socket, const char *buf, unsigned int len, int flags) {
                         //goto send_error;?
                         break;
                 }
+                break;
 
             case 0: // timeout occurred
                 // the connection may be slow
@@ -162,7 +163,7 @@ static void *sig_sendSheethandler() {
     for (;;) {
         sig = 0; // SANITY
         s = sigwait(&set, &sig);
-        if (s != 0) {
+        if (s == 0) {
             s = pthread_sigmask(SIG_BLOCK, &set, NULL);
             if (sig == SIGNAL_SEND_SPREADSHEET) {
                 char sheetCopy[4096];
@@ -200,6 +201,9 @@ void updateSpreadSheet(char *data) {
         // package the last spread sheet in this variable
         // while no other thread can change it
         // strLastSpreadSheet == last spread sheet
+        
+        // CREATE A DUMMY SPREADSHEET FOR TESTING
+        strncpy(strLastSpreadSheet,"1\r\n2\r\n3\r\n4\r\n/5\r\n6\r\n7\r\n8\r\n9\r\n\r\n",4095);
 
         //-------------------------------------
         pthread_mutex_unlock(&gmutex_SSheet);
@@ -217,8 +221,8 @@ void updateSpreadSheet(char *data) {
     } while (1);
 }
 
-void * clientProcessor(void *arg) {
-    int commSocket = *(int*) arg;
+void * serverProcessor(void *arg) {
+    int commSocket = -1;
     int ires;
     int total = 0; // how many bytes we've received
     fd_set readfds;
@@ -227,8 +231,13 @@ void * clientProcessor(void *arg) {
     char recvbuf[4096];
     size_t recvbuflen = 4096;
 
-    do {
+    if (arg == NULL) {
+        return NULL;
+    }
+    commSocket = *(int*) arg;
+    free(arg);
 
+    do {
         // process the socket
         FD_ZERO(&readfds);
         FD_SET(commSocket, &readfds);
@@ -265,6 +274,7 @@ void * clientProcessor(void *arg) {
                         continue;
                         break;
                 }
+                break;
 
             case 0: // timeout occurred
                 /**
@@ -322,6 +332,7 @@ void * clientProcessor(void *arg) {
                             received_data[ioffset] = '\0';
                             strncpy(recvbuf, &received_data[ioffset + 4], total - (ioffset + 4));
                             total = total - (ioffset + 4);
+                            recvbuf[total] = '\0';
 
                             if (firstClientSocket == commSocket && !strcmp(received_data, "SHUTDOWN")) {
                                 gbContinueProcessingSpreadSheet = 0; // stop processing
@@ -354,8 +365,8 @@ int main(int argc, char** argv) {
 
     int bOptVal = 1;
     int bOptLen = sizeof (int);
-    struct linger lingerOptVal;
-    int lingerOptLen = sizeof (struct linger);
+    //struct linger lingerOptVal;
+    //int lingerOptLen = sizeof (struct linger);
 
     /**
      * SANITY CHECK: Make sure the signal structure is clear
@@ -366,6 +377,7 @@ int main(int argc, char** argv) {
     hints.ai_family = AF_UNSPEC; //AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = AI_PASSIVE; /* For wildcard IP address */
 
     do {
         /**
@@ -396,10 +408,10 @@ int main(int argc, char** argv) {
             /*
              *  make sure the socket is nonblocking 
              */
-            if ((rc = fcntl(commSocket, F_SETFL, O_NONBLOCK)) != -1) {
+            //if ((rc = fcntl(commSocket, F_SETFL, O_NONBLOCK)) != -1) {
                 if ((rc = bind(commSocket, rp->ai_addr, rp->ai_addrlen)) == 0)
                     break; /* Success */
-            }
+            //}
 
             close(commSocket);
             commSocket = -1;
@@ -432,24 +444,24 @@ int main(int argc, char** argv) {
          * we set linger so that is we crash the "**ALL**" of the last data will
          * still be sent
          */
-        lingerOptVal.l_onoff = 1; // true - turn linger on
-        lingerOptVal.l_linger = RECYCLE_TIMEOUT; // 10 seconds - wait before terminate
+        //lingerOptVal.l_onoff = 1; // true - turn linger on
+        //lingerOptVal.l_linger = RECYCLE_TIMEOUT; // 10 seconds - wait before terminate
         bOptLen = setsockopt(commSocket, SOL_SOCKET, SO_KEEPALIVE, (char*) &bOptVal, bOptLen);
-        bOptLen = setsockopt(commSocket, SOL_SOCKET, SO_LINGER, (char*) &lingerOptVal, lingerOptLen);
+        //bOptLen = setsockopt(commSocket, SOL_SOCKET, SO_LINGER, (char*) &lingerOptVal, lingerOptLen);
 
         /**
          * Create a thread to handle termination signals for network handler thread
          * We need a thread so that we can send signal to it - easily
          */
         if ((rc = pthread_create(&pthreadHandler, NULL, &sig_sendSheethandler, NULL))) {
-            printf("Signal handler thread creation failed: [%d]", rc);
+            printf("Signal handler thread creation failed: [%d]\n", rc);
             close(commSocket);
             exit(EXIT_FAILURE);
         }
 
         pthread_mutex_init(&gmutex_SSheet, NULL);
 
-        printf("Ready To Start Processing Spread Sheet Requests");
+        printf("Ready To Start Processing Spread Sheet Requests\n");
 
         do {
             // if the socket fail restart the socket
@@ -483,6 +495,7 @@ int main(int argc, char** argv) {
                             default:
                                 break;
                         }
+                        break;
 
                     case 0: // timeout occurred
                         // the connection may be slow
@@ -497,6 +510,7 @@ int main(int argc, char** argv) {
                             rc = 1;
                             break;
                         }
+                        break;
                 }
             } while (gbContinueProcessingSpreadSheet && !rc);
 
@@ -504,8 +518,8 @@ int main(int argc, char** argv) {
 
             if (gbContinueProcessingSpreadSheet) {
                 // Accept a client socket
-                int clientSocket = accept(commSocket, NULL, NULL);
-                if (clientSocket == -1) {
+                int cSocket = accept(commSocket, NULL, NULL);
+                if (cSocket == -1) {
                     switch (errno) {
                         case EINTR:
                         case EWOULDBLOCK:
@@ -515,41 +529,53 @@ int main(int argc, char** argv) {
                             break;
                     }
                 } else {
-                    lingerOptVal.l_onoff = 1;
-                    lingerOptVal.l_linger = 30; // 10 seconds
-                    bOptLen = setsockopt(clientSocket, SOL_SOCKET, SO_KEEPALIVE, (char*) &bOptVal, bOptLen);
-                    bOptLen = setsockopt(clientSocket, SOL_SOCKET, SO_LINGER, (char*) &lingerOptVal, lingerOptLen);
+                    //lingerOptVal.l_onoff = 1;
+                    //lingerOptVal.l_linger = RECYCLE_TIMEOUT; // 10 seconds
+                    bOptLen = setsockopt(cSocket, SOL_SOCKET, SO_KEEPALIVE, (char*) &bOptVal, bOptLen);
+                    //bOptLen = setsockopt(cSocket, SOL_SOCKET, SO_LINGER, (char*) &lingerOptVal, lingerOptLen);
 
 
                     do {
+                        int *pclientSocket = (int *) malloc(sizeof (int));
+                        if (pclientSocket == NULL) {
+                            printf("Error: NO mem processing client connection\n");
+                            close(cSocket);
+                            break;
+                        }
                         // add socket to linked list
                         // add also the thread-id to the list structure
                         clientlist_t *plist = malloc(sizeof (clientlist_t));
                         if (plist == NULL) {
                             printf("Error: NO mem processing client connection\n");
-                            close(clientSocket);
+                            close(cSocket);
+                            free(pclientSocket);
                             break;
                         }
+                        *pclientSocket = cSocket;
 
                         pthread_t thread;
-                        if (pthread_create(&thread, NULL, clientProcessor, (void *) &clientSocket) != 0) {
+                        if (pthread_create(&thread, NULL, serverProcessor, (void *) pclientSocket) != 0) {
                             printf("Error Setting up session for a client\n");
                             if (plist) {
                                 free(plist);
                             }
-                            close(clientSocket);
+                            close(cSocket);
+                            free(pclientSocket);
                             break;
                         }
 
                         // add socket to linked list
                         // add also the thread-id to the list structure
-                        plist->clientSocket = clientSocket;
+                        plist->clientSocket = cSocket;
                         plist->next = NULL;
                         plist->pthreadClient = thread;
                         if (firstClientSocket == -1) {
-                            firstClientSocket = clientSocket;
+                            firstClientSocket = cSocket;
                             /*this is the controller socket client*/
                         }
+                        // DUMMY TEST LINKED LIST -- DO IT PROPERLY
+                        plist->next = listTop;
+                        listTop = plist;
                         //-------------------------------------
                         // TODO
                         // add "plist" to the linked list
@@ -570,11 +596,12 @@ int main(int argc, char** argv) {
     }
 
     // for client in the linlked list
-    for (clientlist_t list = listTop, listTop = NULL; list;) {
+    clientlist_t *list;
+    for (list = listTop, listTop = NULL; list;) {
         // tell the other clients to shutdown
         // if they get a socket error - THEY SHOULD TERMINATE
-        sendall(list->clientSocket,"SHUTDOWN\r\n\r\n",strlen("SHUTDOWN\r\n\r\n"));
-        clientlist_t temp = list;
+        sendall(list->clientSocket, "SHUTDOWN\r\n\r\n", strlen("SHUTDOWN\r\n\r\n"), 0);
+        clientlist_t *temp = list;
         list = list->next;
         if (temp->pthreadClient) {
             pthread_cancel(temp->pthreadClient);
