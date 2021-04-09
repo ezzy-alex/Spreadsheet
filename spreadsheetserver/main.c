@@ -51,6 +51,7 @@ int firstClientSocket = -1;
 /**
  * floward declare list
  */
+#define STR_CELL_SIZE   128
 typedef struct _tag_linkedlist clientlist_t;
 
 typedef struct _tag_linkedlist {
@@ -59,6 +60,11 @@ typedef struct _tag_linkedlist {
     clientlist_t *next;
 } clientlist_t;
 
+typedef struct _tag_cell {
+    int ival;
+    char sval[STR_CELL_SIZE];
+} cell_t;
+
 clientlist_t *listTop = NULL;
 pthread_mutex_t gmutex_SSheet;
 /**
@@ -66,6 +72,121 @@ pthread_mutex_t gmutex_SSheet;
  */
 char strLastSpreadSheet[4096];
 
+cell_t sheet[9][9];
+
+int isvalidcellref(char *cellref) {
+    int valid = 0;
+    do {
+        if (cellref == NULL)
+            break;
+
+        if (tolower(cellref[0]) < 'a' || tolower(cellref[0]) > 'i')
+            break;
+
+        if (cellref[1] < '1' || cellref[1] > '9')
+            break;
+
+    } while (0);
+    return valid;
+}
+
+int formulatype(char *formula) {
+    int ftype = 0;
+    do {
+        if (formula == NULL)
+            break;
+
+        if (!strcasecmp(&formula[3], "AVERAGE(")) {
+            ftype = 1;
+            break;
+        }
+        if (!strcasecmp(&formula[3], "RANGE(")) {
+            ftype = 2;
+            break;
+        }
+
+        if (!strcasecmp(&formula[3], "SUM(")) {
+            ftype = 3;
+            break;
+        }
+    } while (0);
+    return ftype;
+}
+
+int isvalidformula(char *formula) {
+    int valid = 0;
+    int ft;
+    int offset = 0;
+    do {
+        if (formula == NULL)
+            break;
+
+        if (!isvalidcellref(formula))
+            break;
+
+        if (formula[2] != '=')
+            break;
+
+        if ((ft = formulatype(formula)) == 0)
+            break;
+        switch (ft) {
+            case 1:
+                offset = 11;
+                break;
+            case 2:
+                offset = 9;
+                break;
+            case 3:
+                offset = 7;
+                break;
+        }
+        if (!isvalidcellref(&formula[offset]))
+            break;
+
+        offset++;
+        if (formula[offset] != ',')
+            break;
+        offset++;
+
+        if (!isvalidcellref(&formula[offset]))
+            break;
+
+        offset += 2;
+        if (formula[offset] != ')')
+            break;
+
+        offset++;
+        if (formula[offset] != '\0')
+            break;
+    } while (0);
+    return valid;
+}
+
+int isnumstr(char *str){
+    int ret = 0;
+    int i = 0;
+    
+    for(;isdigit(str[i]);i++);
+    
+    
+    return ret;
+}
+
+int isvalidcelldata(char *celldata){
+    int valid = 0;
+    do{
+        if(celldata==NULL)
+            break;
+        
+        if(celldata[0]=='\''){
+            valid = 1;
+            break;
+        }
+        
+        
+    }while(0);
+    return valid;
+}
 int sendall(int socket, const char *buf, unsigned int len, int flags) {
     int total = 0; // how many bytes we've sent
     int bytesleft = len; // how many we have left to send
@@ -201,9 +322,9 @@ void updateSpreadSheet(char *data) {
         // package the last spread sheet in this variable
         // while no other thread can change it
         // strLastSpreadSheet == last spread sheet
-        
+
         // CREATE A DUMMY SPREADSHEET FOR TESTING
-        strncpy(strLastSpreadSheet,"1\r\n2\r\n3\r\n4\r\n/5\r\n6\r\n7\r\n8\r\n9\r\n\r\n",4095);
+        strncpy(strLastSpreadSheet, "1\r\n2\r\n3\r\n4\r\n/5\r\n6\r\n7\r\n8\r\n9\r\n\r\n", 4095);
 
         //-------------------------------------
         pthread_mutex_unlock(&gmutex_SSheet);
@@ -409,8 +530,8 @@ int main(int argc, char** argv) {
              *  make sure the socket is nonblocking 
              */
             //if ((rc = fcntl(commSocket, F_SETFL, O_NONBLOCK)) != -1) {
-                if ((rc = bind(commSocket, rp->ai_addr, rp->ai_addrlen)) == 0)
-                    break; /* Success */
+            if ((rc = bind(commSocket, rp->ai_addr, rp->ai_addrlen)) == 0)
+                break; /* Success */
             //}
 
             close(commSocket);
