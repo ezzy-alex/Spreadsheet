@@ -74,38 +74,49 @@ char strLastSpreadSheet[4096];
 
 cell_t sheet[9][9];
 
+/*
+Checks for the calidity of the cell reference that was received ()
+*/
 int isvalidcellref(char *cellref) {
     int valid = 0;
     do {
         if (cellref == NULL)
+            valid = 1;
             break;
 
         if (tolower(cellref[0]) < 'a' || tolower(cellref[0]) > 'i')
+            valid = 1;
             break;
 
         if (cellref[1] < '1' || cellref[1] > '9')
+            valid = 1;
             break;
 
     } while (0);
     return valid;
 }
 
+/*Determines the formula type and returns an integer based on the type 
+*/
 int formulatype(char *formula) {
     int ftype = 0;
+    int l = strlen(formula);
     do {
         if (formula == NULL)
             break;
-
-        if (!strcasecmp(&formula[3], "AVERAGE(")) {
+        
+        //If it is an average to be calculated
+        if (l==15 && strcasecmp(&formula[3], "=AVERAGE(")) {
             ftype = 1;
             break;
         }
-        if (!strcasecmp(&formula[3], "RANGE(")) {
+        //If it is a range to be calculated 
+        if (l==13 && strcasecmp(&formula[3], "=RANGE(")) {
             ftype = 2;
             break;
         }
-
-        if (!strcasecmp(&formula[3], "SUM(")) {
+        //If it is a sum to be calculated 
+        if (l==11 && strcasecmp(&formula[3], "=SUM(")) {
             ftype = 3;
             break;
         }
@@ -113,18 +124,62 @@ int formulatype(char *formula) {
     return ftype;
 }
 
+/*
+Gets the cell reference from formula 
+*/
+char * getCellRef(char * formula){
+    int l = strlen(formula);
+    char c1[3], c2[3];
+
+    switch(l){
+        case 4:
+            c1[0] = formula[0];
+            c1[1] = formula[1];
+            break;
+        case 11:
+            if(formulatype(formula) == 1){
+                c1[0] = formula[5];
+                c1[1] = formula[6];
+                c2[0] = formula[8];
+                c2[0] = formula[9];
+                c1[2] = '\0';
+                c2[2] = '\0';
+            }
+            break;
+        case 13:
+            if(formulatype(formula) == 2){
+                c1[0] = formula[7];
+                c1[1] = formula[8];
+                c2[0] = formula[10];
+                c2[0] = formula[11];
+                c1[2] = '\0';
+                c2[2] = '\0';
+            }
+            break;
+        case 15:
+            if(formulatype(formula) == 2){
+                c1[0] = formula[9];
+                c1[1] = formula[10];
+                c2[0] = formula[12];
+                c2[0] = formula[13];
+                c1[2] = '\0';
+                c2[2] = '\0';
+            }
+            break;
+    }
+}
+
 int isvalidformula(char *formula) {
     int valid = 0;
     int ft;
     int offset = 0;
+    int l = strlen(formula);
     do {
         if (formula == NULL)
+            valid = 1;
             break;
 
-        if (!isvalidcellref(formula))
-            break;
-
-        if (formula[2] != '=')
+        if (formula[0] != '=')
             break;
 
         if ((ft = formulatype(formula)) == 0)
@@ -212,7 +267,7 @@ int sendall(int socket, const char *buf, unsigned int len, int flags) {
                     case EINTR:
                         break;
                     default:
-                        //goto send_error;?
+                        //goto send_error;
                         break;
                 }
                 break;
@@ -231,7 +286,7 @@ int sendall(int socket, const char *buf, unsigned int len, int flags) {
                             case EWOULDBLOCK:
                                 break;
                             default:
-                                //goto send_error;?
+                                //goto send_error;
                                 break;
                         }
                     } else if (n > 0) {
