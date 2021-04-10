@@ -27,6 +27,7 @@ Structure to contain information about address of a service provider.  */
 #include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <inttypes.h>
 
 /**
  * BE SURE TO COMPILE WITH AND LINK WITH :  "-pthread" link and compile option
@@ -38,7 +39,12 @@ Structure to contain information about address of a service provider.  */
 #define RECYCLE_TIMEOUT             10 // 10 seconds
 #define SERVERHOSTNAME        NULL //"localhost"
 #define SERVERPORT            "20020"        
-
+#define CELL_TYPE_STRING    1
+#define CELL_TYPE_FLOAT     2
+#define CELL_TYPE_FORMULA   3
+#define CELL_TYPE_INVALID   0
+#define SHEET_COLUMNS       9
+#define SHEET_ROWS          9
 volatile int gbContinueProcessingSpreadSheet = 1;
 pthread_t pthreadHandler;
 int firstClientSocket = -1;
@@ -56,12 +62,16 @@ typedef struct _tag_linkedlist clientlist_t;
 
 typedef struct _tag_linkedlist {
     int clientSocket;
+
     pthread_t pthreadClient;
     clientlist_t *next;
 } clientlist_t;
 
 typedef struct _tag_cell {
-    int ival;
+    int type;
+    char used;
+    char updated;
+    float fval;
     char sval[STR_CELL_SIZE];
 } cell_t;
 
@@ -72,51 +82,66 @@ pthread_mutex_t gmutex_SSheet;
  */
 char strLastSpreadSheet[4096];
 
-cell_t sheet[9][9];
+cell_t sheet[SHEET_ROWS][SHEET_COLUMNS];
 
-/*
-Checks for the calidity of the cell reference that was received ()
-*/
-int isvalidcellref(char *cellref) {
-    int valid = 0;
+int isCellRef(char * cellref) {
+    int nref = 0;
     do {
         if (cellref == NULL)
-            valid = 1;
             break;
 
         if (tolower(cellref[0]) < 'a' || tolower(cellref[0]) > 'i')
-            valid = 1;
             break;
 
         if (cellref[1] < '1' || cellref[1] > '9')
-            valid = 1;
             break;
 
+        nref = 1;
     } while (0);
-    return valid;
+    return nref;
 }
 
-/*Determines the formula type and returns an integer based on the type 
-*/
-int formulatype(char *formula) {
+/*
+Gets the cell reference from formula 
+ */
+int getCellRefColumn(char * cellref) {
+    int nref = -1;
+    do {
+        if (!isCellRef(cellref))
+            break;
+
+        nref = tolower(cellref[0]) - 'a';
+    } while (0);
+    return nref;
+}
+
+int getCellRefRow(char * cellref) {
+    int nref = -1;
+    do {
+        if (!isCellRef(cellref))
+            break;
+
+        nref = cellref[1] - '1';
+    } while (0);
+    return nref;
+}
+
+int getFormulaType(char *formula) {
     int ftype = 0;
-    int l = strlen(formula);
     do {
         if (formula == NULL)
             break;
-        
-        //If it is an average to be calculated
-        if (l==15 && strcasecmp(&formula[3], "=AVERAGE(")) {
+
+        if (!strcasecmp(formula, "AVERAGE(")) {
             ftype = 1;
             break;
         }
-        //If it is a range to be calculated 
-        if (l==13 && strcasecmp(&formula[3], "=RANGE(")) {
+        if (!strcasecmp(formula, "RANGE(")) {
             ftype = 2;
             break;
         }
-        //If it is a sum to be calculated 
-        if (l==11 && strcasecmp(&formula[3], "=SUM(")) {
+
+        if (!strcasecmp(formula, "SUM(")) {
             ftype = 3;
             break;
         }
@@ -124,65 +149,22 @@ int formulatype(char *formula) {
     return ftype;
 }
 
-/*
-Gets the cell reference from formula 
-*/
-char * getCellRef(char * formula){
-    int l = strlen(formula);
-    char c1[3], c2[3];
-
-    switch(l){
-        case 4:
-            c1[0] = formula[0];
-            c1[1] = formula[1];
-            break;
-        case 11:
-            if(formulatype(formula) == 1){
-                c1[0] = formula[5];
-                c1[1] = formula[6];
-                c2[0] = formula[8];
-                c2[0] = formula[9];
-                c1[2] = '\0';
-                c2[2] = '\0';
-            }
-            break;
-        case 13:
-            if(formulatype(formula) == 2){
-                c1[0] = formula[7];
-                c1[1] = formula[8];
-                c2[0] = formula[10];
-                c2[0] = formula[11];
-                c1[2] = '\0';
-                c2[2] = '\0';
-            }
-            break;
-        case 15:
-            if(formulatype(formula) == 2){
-                c1[0] = formula[9];
-                c1[1] = formula[10];
-                c2[0] = formula[12];
-                c2[0] = formula[13];
-                c1[2] = '\0';
-                c2[2] = '\0';
-            }
-            break;
-    }
-}
-
-int isvalidformula(char *formula) {
+int isFormula(char *formula) {
     int valid = 0;
     int ft;
     int offset = 0;
-    int l = strlen(formula);
+    char c1[3], c2[3];
     do {
         if (formula == NULL)
-            valid = 1;
             break;
 
-        if (formula[0] != '=')
+        if (!isCellRef(formula))
             break;
 
-        if ((ft = formulatype(formula)) == 0)
+        if (formula[2] != '=')
+            break;
+
+        if ((ft = getFormulaType(&formula[3])) == 0)
             break;
         switch (ft) {
             case 1:
@@ -195,15 +177,29 @@ int isvalidformula(char *formula) {
                 offset = 7;
                 break;
         }
-        if (!isvalidcellref(&formula[offset]))
+        if (!isCellRef(&formula[offset]))
             break;
+
+        c1[0] = formula[offset];
+        c1[1] = formula[offset + 1];
 
         offset++;
         if (formula[offset] != ',')
             break;
         offset++;
 
-        if (!isvalidcellref(&formula[offset]))
+        if (!isCellRef(&formula[offset]))
+            break;
+
+        c2[0] = formula[offset];
+        c2[1] = formula[offset + 1];
+
+        /**
+         * either the row references must be the same
+         * or the column references must be the same
+         * we are processing only 1D elements
+         */
+        if (c1[0] != c2[0] && c1[1] != c2[1])
             break;
 
         offset += 2;
@@ -217,31 +213,126 @@ int isvalidformula(char *formula) {
     return valid;
 }
 
-int isnumstr(char *str){
+/*
+ * If +123.457abc123 is in str then 'strtof' will make
+ * endptr point to 'a' of abc. even though strtof will
+ * return a valid float of +123.457 we do not consider this as a
+ * valid float and we thus place it in the spreadsheet
+ * as the string "+123.457abc123".
+ */
+int isnumstr(char *str) {
     int ret = 0;
-    int i = 0;
-    
-    for(;isdigit(str[i]);i++);
-    
-    
+    char *endptr;
+
+    do {
+        float fv = strtof(str, &endptr);
+
+        if (endptr != NULL)
+            break;
+
+        ret = 1;
+    } while (0);
+
     return ret;
 }
 
-int isvalidcelldata(char *celldata){
-    int valid = 0;
-    do{
-        if(celldata==NULL)
+int getDataType(char *celldata) {
+    int cType = CELL_TYPE_INVALID;
+    do {
+        if (celldata == NULL || celldata[0] == '\0')
             break;
-        
-        if(celldata[0]=='\''){
-            valid = 1;
+
+        if (celldata[0] == '\'' && celldata[1] == '\0') {
             break;
         }
-        
-        
-    }while(0);
-    return valid;
+
+        if (isnumstr(celldata)) {
+            cType = CELL_TYPE_FLOAT;
+            break;
+        }
+
+        if (isFormula(celldata)) {
+            cType = CELL_TYPE_FORMULA;
+            break;
+        }
+
+        cType = CELL_TYPE_STRING;
+    } while (0);
+    return cType;
 }
+
+int evaluateCell(int col, int row) {
+    int changed = 0;
+    char *endptr;
+    float fv;
+    switch (sheet[row][col].type) {
+        case CELL_TYPE_STRING:
+            //just keep the value
+            break;
+        case CELL_TYPE_FLOAT:
+            fv = sheet[row][col].fval;
+            sheet[row][col].fval = strtof(sheet[row][col].sval, &endptr);
+            if (fv != sheet[row][col].fval)
+                changed = 1;
+            break;
+        case CELL_TYPE_FORMULA:
+        {
+            char c1[3], c2[3];
+            int fType = getFormulaType(sheet[row][col].sval);
+            switch (fType) {
+                case 1://AVERAGE
+                    c1[0] = sheet[row][col].sval[8];
+                    c1[1] = sheet[row][col].sval[9];
+                    c2[0] = sheet[row][col].sval[11];
+                    c2[0] = sheet[row][col].sval[12];
+                    for (int j = c1[1]; j <= c2[1]; j++)
+                        for (int i = c1[0]; i <= c2[0]; i++)
+                            break;
+                case 2://RANGE
+                    c1[0] = sheet[row][col].sval[6];
+                    c1[1] = sheet[row][col].sval[7];
+                    c2[0] = sheet[row][col].sval[9];
+                    c2[0] = sheet[row][col].sval[10];
+                    break;
+                case 3://SUM
+                    c1[0] = sheet[row][col].sval[4];
+                    c1[1] = sheet[row][col].sval[5];
+                    c2[0] = sheet[row][col].sval[7];
+                    c2[0] = sheet[row][col].sval[8];
+                    break;
+            }
+        }
+            break;
+    }
+
+    return 0;
+}
+
+int evaluateSheet() {
+    int circ = 0;
+    int changed = 0;
+
+    do {
+        for (int j = 0; j < SHEET_ROWS; j++)
+            for (int i = 0; i < SHEET_COLUMNS; i++)
+                sheet[j][i].updated = sheet[j][i].used = 0;
+
+        for (int j = 0; j < SHEET_ROWS; j++) {
+            for (int i = 0; i < SHEET_COLUMNS; i++) {
+                int chg = evaluateCell(i, j);
+                changed = (chg ? chg : changed);
+                if (sheet[j][i].updated == 1 && sheet[j][i].used == 1) {
+                    circ = 1;
+                    i = SHEET_COLUMNS + 1;
+                    break;
+                }
+            }
+        }
+
+    } while (changed && !circ);
+    return circ;
+}
+
 int sendall(int socket, const char *buf, unsigned int len, int flags) {
     int total = 0; // how many bytes we've sent
     int bytesleft = len; // how many we have left to send
@@ -267,7 +358,7 @@ int sendall(int socket, const char *buf, unsigned int len, int flags) {
                     case EINTR:
                         break;
                     default:
-                        //goto send_error;
+                        //goto send_error;?
                         break;
                 }
                 break;
@@ -286,7 +377,7 @@ int sendall(int socket, const char *buf, unsigned int len, int flags) {
                             case EWOULDBLOCK:
                                 break;
                             default:
-                                //goto send_error;
+                                //goto send_error;?
                                 break;
                         }
                     } else if (n > 0) {
@@ -364,6 +455,7 @@ static void *sig_sendSheethandler() {
 
 void updateSpreadSheet(char *data) {
     do {
+        int cType;
         if (pthread_mutex_trylock(&gmutex_SSheet)) {
             usleep(100000); // microseconds
             // when you wake up
@@ -373,6 +465,33 @@ void updateSpreadSheet(char *data) {
         //-------------------------------------
         // TODO
         // update the spread sheet
+
+        if (strlen(data) < 4)
+            break;
+
+        if ((cType = getDataType(&data[3])) == CELL_TYPE_INVALID)
+            break;
+
+        int column = getCellRefColumn(data);
+        int row = getCellRefRow(data);
+
+        if (column == -1 || row == -1)
+            break;
+
+        char savedCell[STR_CELL_SIZE];
+        int savedType = sheet[row][column].type;
+
+        sheet[row][column].type = cType;
+        strncpy(savedCell, sheet[row][column].sval, STR_CELL_SIZE);
+        strncpy(sheet[row][column].sval, &data[3], STR_CELL_SIZE - 1);
+        sheet[row][column].sval[STR_CELL_SIZE - 1] = '\0'; //SANITY CHECK
+
+        if (evaluateSheet()) {
+            sheet[row][column].type = savedType;
+            strncpy(sheet[row][column].sval, savedCell, STR_CELL_SIZE);
+            evaluateSheet();
+            break;
+        }
 
         // package the last spread sheet in this variable
         // while no other thread can change it
@@ -510,7 +629,7 @@ void * serverProcessor(void *arg) {
                             total = total - (ioffset + 4);
                             recvbuf[total] = '\0';
 
-                            if (firstClientSocket == commSocket && !strcmp(received_data, "SHUTDOWN")) {
+                            if (/*firstClientSocket == commSocket &&*/ !strcmp(received_data, "SHUTDOWN")) {
                                 gbContinueProcessingSpreadSheet = 0; // stop processing
                                 break;
                             } else {
@@ -547,6 +666,10 @@ int main(int argc, char** argv) {
     /**
      * SANITY CHECK: Make sure the signal structure is clear
      */
+    memset(sheet, 0x00, sizeof (cell_t) * SHEET_COLUMNS * SHEET_ROWS);
+    for (int j = 0; j < SHEET_ROWS; j++)
+        for (int i = 0; i < SHEET_COLUMNS; i++)
+            sheet[j][i].type = CELL_TYPE_FLOAT;
     memset(&pthreadHandler, 0, sizeof (pthread_t));
 
     memset(&hints, 0x00, sizeof (struct addrinfo));
@@ -603,7 +726,7 @@ int main(int argc, char** argv) {
          * SANITY CHECK : this should not occur
          */
         if (commSocket == -1) { /* wah0 - horsey */
-            printf("WEIRD ERROR: Thia should not occur. *** whats up ***\n");
+            printf("WEIRD ERROR: This should not occur. *** whats up ***\n");
             break;
         }
 
