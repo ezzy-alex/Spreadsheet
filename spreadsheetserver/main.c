@@ -28,6 +28,7 @@ Structure to contain information about address of a service provider.  */
 #include <fcntl.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <float.h>
 
 /**
  * BE SURE TO COMPILE WITH AND LINK WITH :  "-pthread" link and compile option
@@ -45,6 +46,9 @@ Structure to contain information about address of a service provider.  */
 #define CELL_TYPE_INVALID   0
 #define SHEET_COLUMNS       9
 #define SHEET_ROWS          9
+#define MAX_RECALCULATES    128
+#define SHEET_BUF_SIZ       (MAX_RECALCULATES*SHEET_COLUMNS*SHEET_ROWS*2)
+
 volatile int gbContinueProcessingSpreadSheet = 1;
 pthread_t pthreadHandler;
 int firstClientSocket = -1;
@@ -80,7 +84,8 @@ pthread_mutex_t gmutex_SSheet;
 /**
  * package the last spread sheet here for sending
  */
-char strLastSpreadSheet[4096];
+char strLastSpreadSheet[SHEET_BUF_SIZ];
+char sheetCopy[SHEET_BUF_SIZ];
 
 cell_t sheet[SHEET_ROWS][SHEET_COLUMNS];
 
@@ -132,16 +137,16 @@ int getFormulaType(char *formula) {
         if (formula == NULL)
             break;
 
-        if (!strcasecmp(formula, "AVERAGE(")) {
+        if (!strncasecmp(formula, "AVERAGE(", 8)) {
             ftype = 1;
             break;
         }
-        if (!strcasecmp(formula, "RANGE(")) {
+        if (!strncasecmp(formula, "RANGE(", 6)) {
             ftype = 2;
             break;
         }
 
-        if (!strcasecmp(formula, "SUM(")) {
+        if (!strncasecmp(formula, "SUM(", 4)) {
             ftype = 3;
             break;
         }
@@ -153,37 +158,31 @@ int isFormula(char *formula) {
     int valid = 0;
     int ft;
     int offset = 0;
-    char c1[3], c2[3];
+    char c1[3], r1[3];
     do {
         if (formula == NULL)
             break;
 
-        if (!isCellRef(formula))
-            break;
-
-        if (formula[2] != '=')
-            break;
-
-        if ((ft = getFormulaType(&formula[3])) == 0)
+        if ((ft = getFormulaType(formula)) == 0)
             break;
         switch (ft) {
             case 1:
-                offset = 11;
+                offset = 8;
                 break;
             case 2:
-                offset = 9;
+                offset = 6;
                 break;
             case 3:
-                offset = 7;
+                offset = 4;
                 break;
         }
         if (!isCellRef(&formula[offset]))
             break;
 
         c1[0] = formula[offset];
-        c1[1] = formula[offset + 1];
+        r1[0] = formula[offset + 1];
 
-        offset++;
+        offset+=2;
         if (formula[offset] != ',')
             break;
         offset++;
@@ -191,15 +190,15 @@ int isFormula(char *formula) {
         if (!isCellRef(&formula[offset]))
             break;
 
-        c2[0] = formula[offset];
-        c2[1] = formula[offset + 1];
+        c1[1] = formula[offset];
+        r1[1] = formula[offset + 1];
 
         /**
          * either the row references must be the same
          * or the column references must be the same
          * we are processing only 1D elements
          */
-        if (c1[0] != c2[0] && c1[1] != c2[1])
+        if (c1[0] != c1[1] && r1[0] != r1[1])
             break;
 
         offset += 2;
@@ -209,6 +208,7 @@ int isFormula(char *formula) {
         offset++;
         if (formula[offset] != '\0')
             break;
+        valid=1;
     } while (0);
     return valid;
 }
@@ -227,7 +227,7 @@ int isnumstr(char *str) {
     do {
         float fv = strtof(str, &endptr);
 
-        if (endptr != NULL)
+        if (endptr != NULL && endptr[0] != '\0')
             break;
 
         ret = 1;
@@ -261,58 +261,135 @@ int getDataType(char *celldata) {
     return cType;
 }
 
+float fnAverage(int row, int col, char *r1, char *c1) {
+    float sum = 0.0f;
+    int count = 0;
+    int r, c;
+
+    for (int j = r1[0]; j <= r1[1]; j++)
+        for (int i = c1[0]; i <= c1[1]; i++) {
+            r = j - '1';
+            c = i - 'a';
+            sum += sheet[r][c].fval;
+            count++;
+            sheet[r][c].used = 1;
+        }
+
+    if (count > 0)
+        sheet[row][col].fval = sum / (float) count;
+
+    sheet[row][col].updated = 1;
+    return sheet[row][col].fval;
+}
+
+float fnRange(int row, int col, char *r1, char *c1) {
+    float rmin = FLT_MAX;
+    float rmax = -FLT_MAX;
+    int r, c;
+
+    for (int j = r1[0]; j <= r1[1]; j++)
+        for (int i = c1[0]; i <= c1[1]; i++) {
+            r = j - '1';
+            c = i - 'a';
+            if (rmin > sheet[r][c].fval)
+                rmin = sheet[r][c].fval;
+
+            if (rmax < sheet[r][c].fval)
+                rmax = sheet[r][c].fval;
+            sheet[r][c].used = 1;
+        }
+
+    if (rmax == FLT_MIN)
+        rmax = rmin; //SANITY CHECK
+
+    sheet[row][col].fval = rmax - rmin;
+
+    sheet[row][col].updated = 1;
+    return sheet[row][col].fval;
+}
+
+float fnSum(int row, int col, char *r1, char *c1) {
+    float sum = 0.0f;
+    int r, c;
+
+    for (int j = r1[0]; j <= r1[1]; j++)
+        for (int i = c1[0]; i <= c1[1]; i++) {
+            r = j - '1';
+            c = i - 'a';
+            sum += sheet[r][c].fval;
+            sheet[r][c].used = 1;
+        }
+
+    sheet[row][col].fval = sum;
+
+    sheet[row][col].updated = 1;
+    return sheet[row][col].fval;
+}
+
 int evaluateCell(int col, int row) {
     int changed = 0;
     char *endptr;
     float fv;
+    char c1[3], r1[3];
+    int fType;
+
     switch (sheet[row][col].type) {
         case CELL_TYPE_STRING:
             //just keep the value
+            sheet[row][col].used = 1;
+            sheet[row][col].updated = 1;
             break;
         case CELL_TYPE_FLOAT:
             fv = sheet[row][col].fval;
             sheet[row][col].fval = strtof(sheet[row][col].sval, &endptr);
             if (fv != sheet[row][col].fval)
                 changed = 1;
+            sheet[row][col].used = 1;
+            sheet[row][col].updated = 1;
             break;
         case CELL_TYPE_FORMULA:
-        {
-            char c1[3], c2[3];
-            int fType = getFormulaType(sheet[row][col].sval);
+            fType = getFormulaType(sheet[row][col].sval);
+            fv = sheet[row][col].fval;
             switch (fType) {
                 case 1://AVERAGE
-                    c1[0] = sheet[row][col].sval[8];
-                    c1[1] = sheet[row][col].sval[9];
-                    c2[0] = sheet[row][col].sval[11];
-                    c2[0] = sheet[row][col].sval[12];
-                    for (int j = c1[1]; j <= c2[1]; j++)
-                        for (int i = c1[0]; i <= c2[0]; i++)
-                            break;
+                    c1[0] = tolower(sheet[row][col].sval[8]);
+                    r1[0] = sheet[row][col].sval[9];
+                    c1[1] = tolower(sheet[row][col].sval[11]);
+                    r1[1] = sheet[row][col].sval[12];
+                    fnAverage(row, col, r1, c1);
+                    break;
                 case 2://RANGE
-                    c1[0] = sheet[row][col].sval[6];
-                    c1[1] = sheet[row][col].sval[7];
-                    c2[0] = sheet[row][col].sval[9];
-                    c2[0] = sheet[row][col].sval[10];
+                    c1[0] = tolower(sheet[row][col].sval[6]);
+                    r1[0] = sheet[row][col].sval[7];
+                    c1[1] = tolower(sheet[row][col].sval[9]);
+                    r1[1] = sheet[row][col].sval[10];
+                    fnRange(row, col, r1, c1);
                     break;
                 case 3://SUM
-                    c1[0] = sheet[row][col].sval[4];
-                    c1[1] = sheet[row][col].sval[5];
-                    c2[0] = sheet[row][col].sval[7];
-                    c2[0] = sheet[row][col].sval[8];
+                    c1[0] = tolower(sheet[row][col].sval[4]);
+                    r1[0] = sheet[row][col].sval[5];
+                    c1[1] = tolower(sheet[row][col].sval[7]);
+                    r1[1] = sheet[row][col].sval[8];
+                    fnSum(row, col, r1, c1);
                     break;
             }
-        }
+            if (fv != sheet[row][col].fval)
+                changed = 1;
+            sheet[row][col].used = 1;
+            sheet[row][col].updated = 1;
             break;
     }
 
-    return 0;
+    return changed;
 }
 
-int evaluateSheet() {
+int evaluateSheet(int mode) {
     int circ = 0;
     int changed = 0;
+    int looper = 0;
 
     do {
+        changed = 0;
         for (int j = 0; j < SHEET_ROWS; j++)
             for (int i = 0; i < SHEET_COLUMNS; i++)
                 sheet[j][i].updated = sheet[j][i].used = 0;
@@ -320,16 +397,20 @@ int evaluateSheet() {
         for (int j = 0; j < SHEET_ROWS; j++) {
             for (int i = 0; i < SHEET_COLUMNS; i++) {
                 int chg = evaluateCell(i, j);
-                changed = (chg ? chg : changed);
-                if (sheet[j][i].updated == 1 && sheet[j][i].used == 1) {
+                if (chg != 0)
+                    changed = chg;
+                /*if (mode == 1
+                        && sheet[j][i].updated == 1 && sheet[j][i].used == 1) {
                     circ = 1;
                     i = SHEET_COLUMNS + 1;
                     break;
-                }
+                }*/
             }
         }
-
-    } while (changed && !circ);
+        looper++;
+    } while (changed && !circ && looper < MAX_RECALCULATES);
+    if (looper >= MAX_RECALCULATES)
+        circ = 1; //we are calling this a circular reference
     return circ;
 }
 
@@ -426,14 +507,17 @@ static void *sig_sendSheethandler() {
 
     sigemptyset(&set);
     sigaddset(&set, SIGNAL_SEND_SPREADSHEET);
-
+    s = pthread_sigmask(SIG_BLOCK, &set, NULL);
+    if (s != 0) {
+        printf("Fatal Error starting spreadsheet handler [%d]", errno);
+        exit(EXIT_FAILURE);
+    }
     for (;;) {
         sig = 0; // SANITY
         s = sigwait(&set, &sig);
         if (s == 0) {
-            s = pthread_sigmask(SIG_BLOCK, &set, NULL);
+            //s = pthread_sigmask(SIG_BLOCK, &set, NULL);
             if (sig == SIGNAL_SEND_SPREADSHEET) {
-                char sheetCopy[4096];
                 do {
                     if (pthread_mutex_trylock(&gmutex_SSheet)) {
                         usleep(100000); // microseconds
@@ -441,14 +525,14 @@ static void *sig_sendSheethandler() {
                         continue;
                     }
                     // make a copy of the sheet
-                    strncpy(sheetCopy, strLastSpreadSheet, 4095);
+                    strncpy(sheetCopy, strLastSpreadSheet, SHEET_BUF_SIZ - 1);
                     pthread_mutex_unlock(&gmutex_SSheet);
                     break;
                 } while (1);
 
                 notifyAllUsers(sheetCopy);
             }
-            s = pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+            //s = pthread_sigmask(SIG_UNBLOCK, &set, NULL);
         }
     }
 }
@@ -456,6 +540,8 @@ static void *sig_sendSheethandler() {
 void updateSpreadSheet(char *data) {
     do {
         int cType;
+        int offset = 0;
+
         if (pthread_mutex_trylock(&gmutex_SSheet)) {
             usleep(100000); // microseconds
             // when you wake up
@@ -463,10 +549,10 @@ void updateSpreadSheet(char *data) {
         }
 
         //-------------------------------------
-        // TODO
         // update the spread sheet
-
-        if (strlen(data) < 4)
+        //check that the data is properly formatted
+        //the third character must be an '=' sign
+        if (data == NULL || strlen(data) < 4 || data[2] != '=')
             break;
 
         if ((cType = getDataType(&data[3])) == CELL_TYPE_INVALID)
@@ -480,26 +566,50 @@ void updateSpreadSheet(char *data) {
 
         char savedCell[STR_CELL_SIZE];
         int savedType = sheet[row][column].type;
+        strncpy(savedCell, sheet[row][column].sval, STR_CELL_SIZE);
+
 
         sheet[row][column].type = cType;
-        strncpy(savedCell, sheet[row][column].sval, STR_CELL_SIZE);
         strncpy(sheet[row][column].sval, &data[3], STR_CELL_SIZE - 1);
         sheet[row][column].sval[STR_CELL_SIZE - 1] = '\0'; //SANITY CHECK
 
-        if (evaluateSheet()) {
+        /**
+         * if the evaluation requires more than "MAX_RECALCULATES"
+         * interations then we are calling this acircular refernce. 
+         * We will not put this formula in the spreadsheet
+         */
+        if (evaluateSheet((cType == CELL_TYPE_FORMULA ? 1 : 0))) {
+            /**
+             * We detect a circular reference so put back the original data
+             */
             sheet[row][column].type = savedType;
             strncpy(sheet[row][column].sval, savedCell, STR_CELL_SIZE);
-            evaluateSheet();
+            evaluateSheet(0);
             break;
         }
 
         // package the last spread sheet in this variable
         // while no other thread can change it
         // strLastSpreadSheet == last spread sheet
-
-        // CREATE A DUMMY SPREADSHEET FOR TESTING
-        strncpy(strLastSpreadSheet, "1\r\n2\r\n3\r\n4\r\n/5\r\n6\r\n7\r\n8\r\n9\r\n\r\n", 4095);
-
+        /**
+         * format must be: "1\r\n2\r\n3\r\n4\r\n/5\r\n6\r\n7\r\n8\r\n9\r\n\r\n"
+         */
+        for (int j = 0; j < SHEET_ROWS; j++)
+            for (int i = 0; i < SHEET_COLUMNS; i++) {
+                switch (sheet[j][i].type) {
+                    case CELL_TYPE_FLOAT:
+                    case CELL_TYPE_FORMULA:
+                        offset += snprintf(&strLastSpreadSheet[offset],
+                                SHEET_BUF_SIZ - offset - 1, "%f\r\n", sheet[j][i].fval);
+                        break;
+                    default:
+                        offset += snprintf(&strLastSpreadSheet[offset],
+                                SHEET_BUF_SIZ - offset - 1, "%s\r\n", sheet[j][i].sval);
+                        break;
+                }
+            }
+        strncpy(&strLastSpreadSheet[offset], "\r\n", SHEET_BUF_SIZ - offset - 1);
+        strLastSpreadSheet[SHEET_BUF_SIZ - 1] = '\0'; //SANITY CHECK
         //-------------------------------------
         pthread_mutex_unlock(&gmutex_SSheet);
 
@@ -660,8 +770,8 @@ int main(int argc, char** argv) {
 
     int bOptVal = 1;
     int bOptLen = sizeof (int);
-    //struct linger lingerOptVal;
-    //int lingerOptLen = sizeof (struct linger);
+    struct linger lingerOptVal;
+    int lingerOptLen = sizeof (struct linger);
 
     /**
      * SANITY CHECK: Make sure the signal structure is clear
@@ -743,10 +853,10 @@ int main(int argc, char** argv) {
          * we set linger so that is we crash the "**ALL**" of the last data will
          * still be sent
          */
-        //lingerOptVal.l_onoff = 1; // true - turn linger on
-        //lingerOptVal.l_linger = RECYCLE_TIMEOUT; // 10 seconds - wait before terminate
+        lingerOptVal.l_onoff = 0; // true - turn linger on
+        lingerOptVal.l_linger = RECYCLE_TIMEOUT; // 10 seconds - wait before terminate
         bOptLen = setsockopt(commSocket, SOL_SOCKET, SO_KEEPALIVE, (char*) &bOptVal, bOptLen);
-        //bOptLen = setsockopt(commSocket, SOL_SOCKET, SO_LINGER, (char*) &lingerOptVal, lingerOptLen);
+        bOptLen = setsockopt(commSocket, SOL_SOCKET, SO_LINGER, (char*) &lingerOptVal, lingerOptLen);
 
         /**
          * Create a thread to handle termination signals for network handler thread
@@ -828,10 +938,10 @@ int main(int argc, char** argv) {
                             break;
                     }
                 } else {
-                    //lingerOptVal.l_onoff = 1;
-                    //lingerOptVal.l_linger = RECYCLE_TIMEOUT; // 10 seconds
+                    lingerOptVal.l_onoff = 0;
+                    lingerOptVal.l_linger = RECYCLE_TIMEOUT; // 10 seconds
                     bOptLen = setsockopt(cSocket, SOL_SOCKET, SO_KEEPALIVE, (char*) &bOptVal, bOptLen);
-                    //bOptLen = setsockopt(cSocket, SOL_SOCKET, SO_LINGER, (char*) &lingerOptVal, lingerOptLen);
+                    bOptLen = setsockopt(cSocket, SOL_SOCKET, SO_LINGER, (char*) &lingerOptVal, lingerOptLen);
 
 
                     do {
